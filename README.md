@@ -1,10 +1,13 @@
 # OpsLens
 
 **Autonomous Incident Response Orchestrator powered by Notion MCP**
+<img width="1536" height="1024" alt="OpsLens-CoverImage" src="https://github.com/user-attachments/assets/172bdf6f-fa02-4e3e-8361-49a32248051c" />
 
 OpsLens transforms Notion into an AI-powered incident command center. It ingests alerts from monitoring tools, runs a pipeline of specialized AI agents for triage, correlation, remediation, and postmortem generation, and writes every finding back to Notion as structured, searchable knowledge. Engineers interact through a real-time dashboard or directly in Notion. The system watches for human edits and reacts, creating a true human-in-the-loop incident response workflow.
 
 Built for the [Notion MCP Challenge](https://dev.to/challenges/notion) on DEV.to.
+
+![OpsLens-Low](https://github.com/user-attachments/assets/0582949b-ae8d-4609-870a-39050c6970b2)
 
 ---
 
@@ -36,6 +39,8 @@ When a production incident fires at 3 AM, the on-call engineer faces a wall of c
 OpsLens eliminates this friction. It receives the alert, runs five specialized AI agents in sequence, writes every finding to Notion, and presents the engineer with a clear picture: what happened, what is affected, what to do next, and who to call. The engineer stays in control. The AI handles the grunt work.
 
 ---
+
+[![OpsLens Demo](https://img.youtube.com/vi/LwMiMLhYXVI/maxresdefault.jpg)](https://youtu.be/LwMiMLhYXVI)
 
 ## How It Works
 
@@ -97,6 +102,9 @@ Manual      ----+         v                                         v
                          |  - Playground    |     |  - Confidence DB |
                          +------------------+     +------------------+
 ```
+
+<img width="1536" height="1024" alt="OpsLens-Architecture" src="https://github.com/user-attachments/assets/23199abc-da9c-4f53-b346-3b3da1c13176" />
+
 
 ### Core Design Decisions
 
