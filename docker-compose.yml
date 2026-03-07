@@ -1,0 +1,26 @@
+services:
+  notion-mcp-server:
+    image: node:20-slim
+    command: npx -y @notionhq/notion-mcp-server --transport http --port 3100 --auth-token ${MCP_AUTH_TOKEN}
+    environment:
+      NOTION_TOKEN: ${NOTION_TOKEN}
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -H 'Authorization: Bearer ${MCP_AUTH_TOKEN}' http://localhost:3100/mcp || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  opslens:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      notion-mcp-server:
+        condition: service_healthy
+    volumes:
+      - ./frontend/dist:/app/src/dashboard
+    restart: unless-stopped

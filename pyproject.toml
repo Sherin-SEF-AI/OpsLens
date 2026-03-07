@@ -1,0 +1,35 @@
+[project]
+name = "opslens"
+version = "1.0.0"
+description = "Autonomous Incident Response Orchestrator via Notion MCP"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "structlog>=24.4.0",
+    "anthropic>=0.40.0",
+    "python-dotenv>=1.0.0",
+    "websockets>=13.0",
+    "notion-client>=2.2.0",
+    "tenacity>=9.0.0",
+    "python-dateutil>=2.9.0",
+    "orjson>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.local
+.env.*.local
+settings.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Build artifacts
+src/dashboard/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Data
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
