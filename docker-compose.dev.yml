@@ -1,0 +1,58 @@
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_LOG_STATEMENT: all
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@opslens.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_PORT: 5050
+    ports:
+      - "5050:5050"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - opslens-network
+
+  celery-worker:
+    volumes:
+      - ./src:/app/src
+    environment:
+      LOG_LEVEL: DEBUG
+    command: >
+      celery -A src.tasks.celery_app worker
+      --loglevel=debug
+      --concurrency=2
+
+  celery-beat:
+    volumes:
+      - ./src:/app/src
+    environment:
+      LOG_LEVEL: DEBUG
+    command: >
+      celery -A src.tasks.celery_app beat
+      --loglevel=debug
+
+  opslens:
+    volumes:
+      - ./src:/app/src
+      - ./frontend/dist:/app/src/dashboard
+    environment:
+      LOG_LEVEL: DEBUG
+      ENVIRONMENT: development
+    command: >
+      uvicorn src.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir src

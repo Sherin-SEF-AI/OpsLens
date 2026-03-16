@@ -9,7 +9,6 @@ from typing import Any
 import structlog
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.agents.orchestrator import AgentOrchestrator
@@ -63,21 +62,40 @@ class WSManager:
 
     def __init__(self):
         self._connections: list[WebSocket] = []
+        self._redis_pubsub = None
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
         self._connections.append(ws)
+        try:
+            from src.observability.metrics import WS_CONNECTIONS
+            WS_CONNECTIONS.set(len(self._connections))
+        except Exception:
+            pass
         logger.info("ws_client_connected", total=len(self._connections))
 
     def disconnect(self, ws: WebSocket) -> None:
         if ws in self._connections:
             self._connections.remove(ws)
+        try:
+            from src.observability.metrics import WS_CONNECTIONS
+            WS_CONNECTIONS.set(len(self._connections))
+        except Exception:
+            pass
         logger.info("ws_client_disconnected", total=len(self._connections))
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         """Broadcast a message to all connected clients."""
         dead: list[WebSocket] = []
         data = json.dumps(message, default=str)
+
+        # If Redis pub/sub is available, publish for multi-instance broadcast
+        if self._redis_pubsub is not None:
+            try:
+                await self._redis_pubsub.publish("opslens:ws:broadcast", data)
+            except Exception:
+                pass
+
         for ws in self._connections:
             try:
                 await ws.send_text(data)
@@ -241,6 +259,88 @@ async def reload_integrations(app: FastAPI) -> dict[str, bool]:
     }
 
 
+# --- Optional Infrastructure Init Helpers ---
+
+async def _init_database(config: OpsLensConfig, log) -> bool:
+    """Initialise the database. Returns True on success, False on failure."""
+    try:
+        from src.database.engine import init_db, engine
+        await init_db()
+        log.info("database_initialized")
+        return True
+    except Exception as exc:
+        log.warning("database_init_failed", error=str(exc), hint="Running without database. Auth and enterprise features disabled.")
+        return False
+
+
+async def _init_redis(config: OpsLensConfig, log):
+    """Initialise Redis connection. Returns the client or None."""
+    try:
+        import redis.asyncio as aioredis
+        redis_client = aioredis.from_url(
+            config.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+        )
+        # Test connectivity
+        await redis_client.ping()
+        log.info("redis_initialized", url=config.REDIS_URL)
+        return redis_client
+    except Exception as exc:
+        log.warning("redis_init_failed", error=str(exc), hint="Running without Redis. Using in-memory fallback.")
+        return None
+
+
+def _init_sentry(config: OpsLensConfig, log) -> None:
+    """Initialise Sentry SDK if DSN is configured."""
+    if not config.SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        sentry_sdk.init(
+            dsn=config.SENTRY_DSN,
+            environment=config.ENVIRONMENT,
+            traces_sample_rate=0.1 if config.ENVIRONMENT == "production" else 1.0,
+            integrations=[
+                StarletteIntegration(),
+                FastApiIntegration(),
+            ],
+        )
+        log.info("sentry_initialized")
+    except ImportError:
+        log.debug("sentry_sdk_not_installed")
+    except Exception as exc:
+        log.warning("sentry_init_failed", error=str(exc))
+
+
+def _init_opentelemetry(config: OpsLensConfig, app: FastAPI, log) -> None:
+    """Initialise OpenTelemetry if endpoint is configured."""
+    if not config.OTEL_EXPORTER_OTLP_ENDPOINT:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        resource = Resource.create({"service.name": config.APP_NAME})
+        provider = TracerProvider(resource=resource)
+        exporter = OTLPSpanExporter(endpoint=config.OTEL_EXPORTER_OTLP_ENDPOINT)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+
+        FastAPIInstrumentor.instrument_app(app)
+        log.info("opentelemetry_initialized", endpoint=config.OTEL_EXPORTER_OTLP_ENDPOINT)
+    except ImportError:
+        log.debug("opentelemetry_sdk_not_installed")
+    except Exception as exc:
+        log.warning("opentelemetry_init_failed", error=str(exc))
+
+
 # --- Lifespan ---
 
 @asynccontextmanager
@@ -248,6 +348,34 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
     config: OpsLensConfig = app.state.config
     log = logger.bind(app=config.APP_NAME)
+
+    # --- Infrastructure: Database ---
+    db_ok = await _init_database(config, log)
+    if db_ok:
+        try:
+            from src.database.engine import engine as db_engine
+            app.state.db_engine = db_engine
+        except Exception:
+            app.state.db_engine = None
+    else:
+        app.state.db_engine = None
+
+    # --- Infrastructure: Redis ---
+    redis_client = await _init_redis(config, log)
+    app.state.redis = redis_client
+    if redis_client is not None:
+        ws_manager._redis_pubsub = redis_client
+
+    # --- Infrastructure: Sentry ---
+    _init_sentry(config, log)
+
+    # --- Health Checks ---
+    try:
+        from src.observability.health import setup_health_checks
+        health_checker = setup_health_checks(app)
+        log.info("health_checks_registered")
+    except Exception as exc:
+        log.warning("health_checks_setup_failed", error=str(exc))
 
     # Initialize MCP client
     mcp_client = NotionMCPClient(config.NOTION_MCP_URL, config.MCP_AUTH_TOKEN)
@@ -315,6 +443,13 @@ async def lifespan(app: FastAPI):
     async def handle_alert(alert: UnifiedAlert) -> None:
         """Process a normalized alert into an incident."""
         incident = await incident_manager.create_incident(alert)
+
+        # Track incident creation metric
+        try:
+            from src.observability.metrics import track_incident_created
+            track_incident_created(incident.severity, incident.service, incident.source)
+        except Exception:
+            pass
 
         # Send Slack notification (deep integration or simple webhook)
         if slack_integration.enabled:
@@ -400,6 +535,24 @@ async def lifespan(app: FastAPI):
     await command_center.stop()
     await notion_watcher.stop()
     await mcp_client.close()
+
+    # Dispose database engine
+    if db_ok:
+        try:
+            from src.database.engine import dispose_engine
+            await dispose_engine()
+            log.info("database_engine_disposed")
+        except Exception:
+            pass
+
+    # Close Redis
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+            log.info("redis_connection_closed")
+        except Exception:
+            pass
+
     log.info("opslens_shutdown")
 
 
@@ -418,22 +571,76 @@ def create_app() -> FastAPI:
     app.state.config = config
     set_app_ref(app)
 
-    # CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # --- Error handlers ---
+    try:
+        from src.errors import register_exception_handlers
+        register_exception_handlers(app)
+    except Exception:
+        logger.debug("error_handlers_registration_skipped")
 
-    # Include routers
+    # --- CORS (must be added before other middleware) ---
+    try:
+        from src.security.cors import setup_cors
+        setup_cors(app, environment=config.ENVIRONMENT)
+    except ImportError:
+        # Fallback to basic CORS
+        from fastapi.middleware.cors import CORSMiddleware
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # --- Metrics middleware ---
+    try:
+        from src.observability.metrics import MetricsMiddleware, metrics_endpoint
+        app.add_middleware(MetricsMiddleware)
+        app.add_route("/metrics", metrics_endpoint, methods=["GET"])
+    except ImportError:
+        logger.debug("prometheus_metrics_not_available")
+
+    # --- Audit middleware ---
+    try:
+        from compliance.audit_middleware import AuditMiddleware
+        app.add_middleware(AuditMiddleware)
+    except ImportError:
+        logger.debug("audit_middleware_not_available")
+
+    # --- Rate limiter ---
+    try:
+        from src.security.rate_limiter import setup_rate_limiter
+        setup_rate_limiter(app)
+    except ImportError:
+        logger.debug("rate_limiter_not_available")
+
+    # --- OpenTelemetry ---
+    _init_opentelemetry(config, app, logger)
+
+    # --- Include routers ---
+
+    # Auth router
+    try:
+        from src.auth.router import router as auth_router
+        app.include_router(auth_router)
+    except ImportError:
+        logger.debug("auth_router_not_available")
+
+    # Enterprise router
+    try:
+        from src.enterprise.router import router as enterprise_router
+        app.include_router(enterprise_router)
+    except ImportError:
+        logger.debug("enterprise_router_not_available")
+
+    # Existing routers
     app.include_router(webhook_router)
     app.include_router(api_router)
     app.include_router(settings_router)
     app.include_router(integrations_router)
 
-    # Health check
+    # Health check (existing simple endpoint - enhanced checks added in lifespan)
     @app.get("/health")
     async def health():
         mcp_ok = False
@@ -495,6 +702,10 @@ def create_app() -> FastAPI:
         except Exception:
             pass
 
+        # Infrastructure statuses
+        db_ok = getattr(app.state, "db_engine", None) is not None
+        redis_ok = getattr(app.state, "redis", None) is not None
+
         return {
             "status": "healthy",
             "mcp_connected": mcp_ok,
@@ -506,6 +717,8 @@ def create_app() -> FastAPI:
             "cloud_providers": cloud_enabled,
             "knowledge_base_documents": kb_docs,
             "outbound_webhook_subscriptions": outbound_count,
+            "database": db_ok,
+            "redis": redis_ok,
         }
 
     # WebSocket endpoint

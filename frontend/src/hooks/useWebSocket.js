@@ -12,6 +12,17 @@ export function useWebSocket(onMessage) {
   }, [onMessage]);
 
   useEffect(() => {
+    // If onMessage is null/undefined, don't connect (user not authenticated)
+    if (!onMessage) {
+      // Close existing connection if any
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (ws) ws.close();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      setConnected(false);
+      return;
+    }
+
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const url = `${protocol}//${window.location.host}/ws/incidents`;
@@ -56,7 +67,7 @@ export function useWebSocket(onMessage) {
       if (ws) ws.close();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
-  }, []);
+  }, [!!onMessage]);
 
   return { connected };
 }

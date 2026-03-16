@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opslens
+  labels:
+    app.kubernetes.io/name: opslens
+    app.kubernetes.io/part-of: opslens

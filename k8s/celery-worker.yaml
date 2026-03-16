@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker
+  namespace: opslens
+  labels:
+    app.kubernetes.io/name: opslens
+    app.kubernetes.io/component: celery-worker
+    app.kubernetes.io/part-of: opslens
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opslens
+      app.kubernetes.io/component: celery-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opslens
+        app.kubernetes.io/component: celery-worker
+        app.kubernetes.io/part-of: opslens
+    spec:
+      containers:
+        - name: celery-worker
+          image: ghcr.io/OWNER/opslens:latest
+          command:
+            - celery
+            - -A
+            - src.tasks.celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency=4
+          envFrom:
+            - configMapRef:
+                name: opslens-config
+            - secretRef:
+                name: opslens-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - celery -A src.tasks.celery_app inspect ping --timeout 10
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3

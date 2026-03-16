@@ -1,10 +1,10 @@
 """REST API routes for the dashboard."""
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 logger = structlog.get_logger()
@@ -19,6 +19,14 @@ from src.api.schemas import (
 from src.incidents.manager import IncidentManager
 from src.incidents.models import IncidentStatus, TimelineEventType
 from src.incidents.state_machine import InvalidTransition
+
+# Optional auth dependency -- returns None if no token present
+try:
+    from src.auth.middleware import get_optional_user
+except ImportError:
+    # Auth module not available, provide a stub
+    async def get_optional_user():
+        return None
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -48,11 +56,21 @@ def _get_manager() -> IncidentManager:
     return _incident_manager
 
 
+def _track_api(method: str, endpoint: str, status_code: str, latency: float = 0.0) -> None:
+    """Best-effort metrics tracking for API calls."""
+    try:
+        from src.observability.metrics import track_api_request
+        track_api_request(method, endpoint, status_code, latency)
+    except Exception:
+        pass
+
+
 @router.get("/incidents", response_model=list[IncidentResponse])
 async def list_incidents(
     status: str | None = None,
     severity: str | None = None,
     service: str | None = None,
+    current_user=Depends(get_optional_user),
 ):
     """List incidents with optional filters."""
     manager = _get_manager()
@@ -76,7 +94,7 @@ async def list_incidents(
 
 
 @router.get("/incidents/active", response_model=list[IncidentResponse])
-async def list_active_incidents():
+async def list_active_incidents(current_user=Depends(get_optional_user)):
     """Get only active (non-resolved) incidents."""
     manager = _get_manager()
     incidents = manager.get_active_incidents()
@@ -85,14 +103,14 @@ async def list_active_incidents():
 
 
 @router.get("/incidents/stats", response_model=StatsResponse)
-async def get_stats():
+async def get_stats(current_user=Depends(get_optional_user)):
     """Get incident metrics."""
     manager = _get_manager()
     return StatsResponse(**manager.get_stats())
 
 
 @router.get("/incidents/{incident_id}", response_model=IncidentDetailResponse)
-async def get_incident(incident_id: str):
+async def get_incident(incident_id: str, current_user=Depends(get_optional_user)):
     """Get detailed incident info."""
     manager = _get_manager()
     incident = manager.get_incident(incident_id)
@@ -105,7 +123,7 @@ async def get_incident(incident_id: str):
 
 
 @router.get("/incidents/{incident_id}/timeline")
-async def get_timeline(incident_id: str):
+async def get_timeline(incident_id: str, current_user=Depends(get_optional_user)):
     """Get incident timeline events."""
     manager = _get_manager()
     incident = manager.get_incident(incident_id)
@@ -116,7 +134,7 @@ async def get_timeline(incident_id: str):
 
 
 @router.post("/incidents/{incident_id}/transition", response_model=IncidentResponse)
-async def transition_incident(incident_id: str, req: TransitionRequest):
+async def transition_incident(incident_id: str, req: TransitionRequest, current_user=Depends(get_optional_user)):
     """Manually transition an incident to a new status."""
     manager = _get_manager()
 
@@ -127,9 +145,13 @@ async def transition_incident(incident_id: str, req: TransitionRequest):
             400, f"Invalid status: {req.new_status}. Valid: {[s.value for s in IncidentStatus]}"
         )
 
+    actor = req.actor
+    if current_user is not None:
+        actor = actor or getattr(current_user, "name", actor) or "dashboard-user"
+
     try:
         incident = await manager.transition(
-            incident_id, new_status, reason=req.reason, actor=req.actor
+            incident_id, new_status, reason=req.reason, actor=actor
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -146,15 +168,20 @@ async def transition_incident(incident_id: str, req: TransitionRequest):
 
 
 @router.post("/incidents/{incident_id}/comment")
-async def add_comment(incident_id: str, req: CommentRequest):
+async def add_comment(incident_id: str, req: CommentRequest, current_user=Depends(get_optional_user)):
     """Add a manual comment to an incident."""
     manager = _get_manager()
+
+    actor = req.actor
+    if current_user is not None:
+        actor = actor or getattr(current_user, "name", actor) or "dashboard-user"
+
     try:
         await manager.add_timeline_event(
             incident_id,
             req.comment,
             event_type=TimelineEventType.MANUAL_ACTION,
-            actor=req.actor,
+            actor=actor,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -162,7 +189,7 @@ async def add_comment(incident_id: str, req: CommentRequest):
 
 
 @router.get("/services")
-async def list_services():
+async def list_services(current_user=Depends(get_optional_user)):
     """List known services (from incidents)."""
     manager = _get_manager()
     services = set()
@@ -172,13 +199,13 @@ async def list_services():
 
 
 @router.get("/runbooks")
-async def list_runbooks():
-    """Placeholder — runbooks are managed in Notion."""
+async def list_runbooks(current_user=Depends(get_optional_user)):
+    """Placeholder -- runbooks are managed in Notion."""
     return {"message": "Runbooks are managed in the Notion Runbooks database"}
 
 
 @router.post("/sync/poll")
-async def trigger_sync_poll():
+async def trigger_sync_poll(current_user=Depends(get_optional_user)):
     """Manually trigger a Notion sync poll (checks for human edits now)."""
     if not _notion_watcher:
         raise HTTPException(503, "Notion watcher not initialized")
@@ -187,7 +214,7 @@ async def trigger_sync_poll():
 
 
 @router.post("/incidents/{incident_id}/sync")
-async def sync_incident_from_notion(incident_id: str):
+async def sync_incident_from_notion(incident_id: str, current_user=Depends(get_optional_user)):
     """Force sync a single incident from Notion (detect human edits now)."""
     manager = _get_manager()
     incident = manager.get_incident(incident_id)
@@ -206,7 +233,7 @@ async def sync_incident_from_notion(incident_id: str):
     }
 
 
-# ── Webhook Playground ──────────────────────────────────────────────
+# -- Webhook Playground ----------------------------------------------------------
 
 
 class PlaygroundRequest(BaseModel):
@@ -215,7 +242,7 @@ class PlaygroundRequest(BaseModel):
 
 
 @router.post("/playground/test")
-async def playground_test(req: PlaygroundRequest):
+async def playground_test(req: PlaygroundRequest, current_user=Depends(get_optional_user)):
     """Dry-run a webhook payload: normalize it without creating an incident."""
     from src.webhooks.normalizer import (
         normalize_alertmanager,
@@ -296,8 +323,8 @@ async def playground_test(req: PlaygroundRequest):
 
 
 @router.post("/playground/send")
-async def playground_send(req: PlaygroundRequest):
-    """Send a webhook payload live — normalize and create a real incident."""
+async def playground_send(req: PlaygroundRequest, current_user=Depends(get_optional_user)):
+    """Send a webhook payload live -- normalize and create a real incident."""
     from src.webhooks.normalizer import (
         normalize_alertmanager,
         normalize_generic,
@@ -344,12 +371,12 @@ async def playground_send(req: PlaygroundRequest):
         raise HTTPException(500, f"Failed to process: {e}")
 
 
-# ── Agent Audit Trail ────────────────────────────────────────────────
+# -- Agent Audit Trail --------------------------------------------------------
 
 
 @router.get("/audit-trail")
-async def get_audit_trail(incident_id: str | None = None):
-    """Get agent audit trail — all timeline events across incidents or for one."""
+async def get_audit_trail(incident_id: str | None = None, current_user=Depends(get_optional_user)):
+    """Get agent audit trail -- all timeline events across incidents or for one."""
     manager = _get_manager()
 
     if incident_id:
@@ -389,7 +416,7 @@ async def get_audit_trail(incident_id: str | None = None):
 
 
 @router.get("/audit-trail/{incident_id}/replay")
-async def get_incident_replay(incident_id: str):
+async def get_incident_replay(incident_id: str, current_user=Depends(get_optional_user)):
     """Get a structured replay of agent actions for a single incident."""
     manager = _get_manager()
     incident = manager.get_incident(incident_id)
@@ -449,7 +476,7 @@ async def get_incident_replay(incident_id: str):
     }
 
 
-# ── Semantic Search ──────────────────────────────────────────────────
+# -- Semantic Search ----------------------------------------------------------
 
 _notion_tools = None
 _knowledge_base = None
@@ -467,7 +494,7 @@ class SearchRequest(BaseModel):
 
 
 @router.post("/search")
-async def semantic_search(req: SearchRequest):
+async def semantic_search(req: SearchRequest, current_user=Depends(get_optional_user)):
     """Unified semantic search across incidents, Notion, and knowledge base."""
     import json as _json
 
@@ -595,7 +622,7 @@ async def semantic_search(req: SearchRequest):
     return results
 
 
-# ── Incident Commander ───────────────────────────────────────────────
+# -- Incident Commander -------------------------------------------------------
 
 _commander = None
 
@@ -615,7 +642,7 @@ _commander_conversations: dict[str, list[dict]] = {}
 
 
 @router.post("/incidents/{incident_id}/commander")
-async def commander_query(incident_id: str, req: CommanderRequest):
+async def commander_query(incident_id: str, req: CommanderRequest, current_user=Depends(get_optional_user)):
     """Send a query to the Incident Commander for a specific incident."""
     if not _commander:
         raise HTTPException(503, "Incident Commander not initialized")
@@ -653,7 +680,7 @@ async def commander_query(incident_id: str, req: CommanderRequest):
 
 
 @router.delete("/incidents/{incident_id}/commander/history")
-async def clear_commander_history(incident_id: str):
+async def clear_commander_history(incident_id: str, current_user=Depends(get_optional_user)):
     """Clear conversation history for an incident's commander."""
     keys_to_remove = [k for k in _commander_conversations if k.startswith(incident_id)]
     for k in keys_to_remove:

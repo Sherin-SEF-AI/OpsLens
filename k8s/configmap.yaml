@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opslens-config
+  namespace: opslens
+  labels:
+    app.kubernetes.io/name: opslens
+    app.kubernetes.io/component: config
+data:
+  APP_NAME: "OpsLens"
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  REDIS_URL: "redis://redis-svc.opslens.svc.cluster.local:6379/0"
+  DATABASE_URL: "postgresql+asyncpg://opslens:$(POSTGRES_PASSWORD)@postgres-svc.opslens.svc.cluster.local:5432/opslens"
+  NOTION_MCP_URL: "http://notion-mcp-svc.opslens.svc.cluster.local:3100"
+  CELERY_BROKER_URL: "redis://redis-svc.opslens.svc.cluster.local:6379/1"
+  CELERY_RESULT_BACKEND: "redis://redis-svc.opslens.svc.cluster.local:6379/2"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  REFRESH_TOKEN_EXPIRE_DAYS: "7"
+  CORS_ORIGINS: "https://opslens.example.com"

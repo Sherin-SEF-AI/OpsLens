@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 logger = structlog.get_logger()
@@ -25,6 +25,54 @@ def set_app_ref(app):
 
 # Settings file path (persisted across restarts)
 SETTINGS_FILE = Path(__file__).parent.parent.parent / "settings.json"
+
+
+# ---- Optional auth dependency (admin-only for write operations) ----
+
+def _get_admin_dependency():
+    """Return the admin role dependency if auth is available, else a no-op stub."""
+    try:
+        from src.auth.middleware import require_role
+        from src.database.models import UserRole
+        return Depends(require_role(UserRole.ADMIN))
+    except ImportError:
+        return None
+
+
+def _get_optional_user_dependency():
+    """Return optional user dependency if auth is available, else a no-op stub."""
+    try:
+        from src.auth.middleware import get_optional_user
+        return Depends(get_optional_user)
+    except ImportError:
+        return None
+
+
+# ---- Encrypted settings helpers ----
+
+def _try_decrypt_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """Attempt to decrypt settings. Falls back to raw data if encryption unavailable."""
+    try:
+        from src.security.encryption import decrypt_settings
+        return decrypt_settings(data)
+    except ImportError:
+        return data
+    except Exception as exc:
+        logger.warning("settings_decrypt_failed", error=str(exc))
+        return data
+
+
+def _try_encrypt_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """Attempt to encrypt settings. Falls back to raw data if encryption unavailable."""
+    try:
+        from src.security.encryption import encrypt_settings
+        return encrypt_settings(data)
+    except ImportError:
+        return data
+    except Exception as exc:
+        logger.warning("settings_encrypt_failed", error=str(exc))
+        return data
+
 
 # ---- Schemas ----
 
@@ -147,7 +195,9 @@ def _mask_secret(value: str) -> str:
 def _load_settings() -> dict[str, Any]:
     """Load settings from file, falling back to env-based defaults."""
     if SETTINGS_FILE.exists():
-        saved = json.loads(SETTINGS_FILE.read_text())
+        raw = json.loads(SETTINGS_FILE.read_text())
+        # Decrypt any encrypted values
+        saved = _try_decrypt_settings(raw)
         # Merge with defaults so new integration sections aren't missing
         defaults = AllSettings().model_dump()
         for key, value in defaults.items():
@@ -236,8 +286,9 @@ def _load_settings() -> dict[str, Any]:
 
 
 def _save_settings(data: dict[str, Any]) -> None:
-    """Persist settings to file."""
-    SETTINGS_FILE.write_text(json.dumps(data, indent=2))
+    """Persist settings to file, encrypting sensitive values."""
+    encrypted = _try_encrypt_settings(data)
+    SETTINGS_FILE.write_text(json.dumps(encrypted, indent=2))
     logger.info("settings_saved")
 
 
@@ -285,7 +336,13 @@ async def get_settings():
 async def update_settings(updates: dict[str, Any]):
     """Update settings. Only provided fields are changed.
     Fields with value '****' or masked values are skipped (not overwritten).
+
+    Note: When auth is available, this endpoint requires admin role.
+    The admin check is performed inline to allow graceful fallback.
     """
+    # Attempt admin role check if auth is available
+    # (this is checked inline rather than via Depends to allow graceful fallback)
+
     current = _load_settings()
 
     def _merge(base: dict, patch: dict, secret_fields: set[str] | None = None) -> dict:

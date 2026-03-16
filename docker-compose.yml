@@ -1,4 +1,40 @@
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: opslens
+      POSTGRES_PASSWORD: opslens
+      POSTGRES_DB: opslens
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opslens -d opslens"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - opslens-network
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - opslens-network
+
   notion-mcp-server:
     image: node:20-slim
     command: npx -y @notionhq/notion-mcp-server --transport http --port 3100 --auth-token ${MCP_AUTH_TOKEN}
@@ -12,15 +48,71 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    networks:
+      - opslens-network
+
+  celery-worker:
+    build: .
+    command: celery -A src.tasks.celery_app worker --loglevel=info --concurrency=4
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://opslens:opslens@postgres:5432/opslens
+      REDIS_URL: redis://redis:6379/0
+      NOTION_MCP_URL: http://notion-mcp-server:3100
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - opslens-network
+
+  celery-beat:
+    build: .
+    command: celery -A src.tasks.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://opslens:opslens@postgres:5432/opslens
+      REDIS_URL: redis://redis:6379/0
+      NOTION_MCP_URL: http://notion-mcp-server:3100
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - opslens-network
 
   opslens:
     build: .
     ports:
       - "8000:8000"
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://opslens:opslens@postgres:5432/opslens
+      REDIS_URL: redis://redis:6379/0
+      NOTION_MCP_URL: http://notion-mcp-server:3100
     depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
       notion-mcp-server:
         condition: service_healthy
     volumes:
       - ./frontend/dist:/app/src/dashboard
     restart: unless-stopped
+    networks:
+      - opslens-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  opslens-network:
+    driver: bridge

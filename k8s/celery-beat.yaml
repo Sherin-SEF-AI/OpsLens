@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-beat
+  namespace: opslens
+  labels:
+    app.kubernetes.io/name: opslens
+    app.kubernetes.io/component: celery-beat
+    app.kubernetes.io/part-of: opslens
+spec:
+  # Celery Beat MUST be a singleton to prevent duplicate scheduled tasks
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opslens
+      app.kubernetes.io/component: celery-beat
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opslens
+        app.kubernetes.io/component: celery-beat
+        app.kubernetes.io/part-of: opslens
+    spec:
+      containers:
+        - name: celery-beat
+          image: ghcr.io/OWNER/opslens:latest
+          command:
+            - celery
+            - -A
+            - src.tasks.celery_app
+            - beat
+            - --loglevel=info
+          envFrom:
+            - configMapRef:
+                name: opslens-config
+            - secretRef:
+                name: opslens-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - "test -f /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid)"
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 3
